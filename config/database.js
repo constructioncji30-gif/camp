@@ -1,24 +1,5 @@
-// const sql = require('msnodesqlv8');
-
-// const dbConfig = {
-//   connectionString: 
-//     "server=localhost\\SQLEXPRESS;Database=Company Management;Trusted_Connection=Yes;Driver={SQL Server Native Client 11.0}"
-// };
-
-// function query(queryString, params = []) {
-//   return new Promise((resolve, reject) => {
-//     sql.query(dbConfig.connectionString, queryString, params, (err, rows) => {
-//       if (err) reject(err);
-//       else resolve(rows);
-//     });
-//   });
-// }
-
-// module.exports = { query };
-
-
 const sql = require('mssql');
- 
+
 const dbConfig = {
   user: 'db50902',
   password: '9p-D%Fi3o_4G',
@@ -37,24 +18,37 @@ let pool = null;
 async function getConnection() {
   if (!pool) {
     pool = await sql.connect(dbConfig);
+    console.log('✅ Database connected successfully');
   }
   return pool;
 }
 
+// BEST VERSION: Uses regex to replace ALL ? placeholders
 async function query(queryString, params = []) {
   try {
     const connection = await getConnection();
     const request = connection.request();
     
-    // Add parameters if provided
+    // Add parameters
     params.forEach((param, index) => {
-      request.input(`param${index}`, param);
+      request.input(`p${index}`, param);
     });
     
-    const result = await request.query(queryString);
+    // Replace ALL ? with @p0, @p1, etc. using regex
+    let formattedQuery = queryString;
+    let counter = 0;
+    formattedQuery = formattedQuery.replace(/\?/g, () => `@p${counter++}`);
+    
+    // Debug logging (remove in production)
+    console.log('SQL:', formattedQuery);
+    console.log('Params:', params);
+    
+    const result = await request.query(formattedQuery);
     return result.recordset;
   } catch (err) {
-    console.error('Database error:', err);
+    console.error('Database error:', err.message);
+    console.error('Failed query:', queryString);
+    console.error('Params:', params);
     throw err;
   }
 }
