@@ -1,83 +1,40 @@
 const express = require('express');
 const cors = require('cors');
-const sql = require('mssql');
+const Worker = require('./Models/Worker');
+const { query } = require('./config/database');
+const Staff = require('./Models/Staff');
 
 const app = express();
 
-// Middleware
-app.use(cors());
+// ============ CORS FIXES ============
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Handle preflight OPTIONS requests
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.sendStatus(200);
+});
+
+// Body parsers
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Request logging (only in development)
-if (process.env.NODE_ENV !== 'production') {
-  app.use((req, res, next) => {
-    console.log(`[${req.method}] ${req.url}`);
-    console.log('Body:', req.body);
-    next();
-  });
-}
-
-// Database configuration
-const dbConfig = {
-  server: process.env.DB_SERVER || 'db50897.databaseasp.net',
-  database: process.env.DB_NAME || 'db50897',
-  user: process.env.DB_USER || 'db50897',
-  password: process.env.DB_PASSWORD,
-  port: parseInt(process.env.DB_PORT) || 1433,
-  options: {
-    encrypt: false,
-    trustServerCertificate: true,
-    enableArithAbort: true
-  },
-  connectionTimeout: 30000,
-  requestTimeout: 30000,
-  pool: {
-    max: 1,
-    min: 0,
-    idleTimeoutMillis: 30000
+// Debug logging middleware
+app.use((req, res, next) => {
+  console.log(`[${req.method}] ${req.path}`);
+  if (req.method !== 'GET' && req.body && Object.keys(req.body).length > 0) {
+    console.log('Body:', JSON.stringify(req.body));
   }
-};
+  next();
+});
 
-// Database connection function for serverless
-let pool = null;
-
-async function getConnection() {
-  try {
-    if (pool && pool.connected) {
-      return pool;
-    }
-    pool = await sql.connect(dbConfig);
-    return pool;
-  } catch (err) {
-    console.error('Database connection error:', err);
-    throw err;
-  }
-}
-
-async function query(sqlString, params = []) {
-  try {
-    const connection = await getConnection();
-    const request = connection.request();
-    
-    params.forEach((param, index) => {
-      request.input(`p${index}`, param);
-    });
-    
-    let formattedSql = sqlString;
-    for (let i = 0; i < params.length; i++) {
-      formattedSql = formattedSql.replace('?', `@p${i}`);
-    }
-    
-    const result = await request.query(formattedSql);
-    return result.recordset;
-  } catch (err) {
-    console.error('Query error:', err);
-    throw err;
-  }
-}
-
-// Helper functions
+// --- Helper functions ---
 function parseDate(str) {
   if (!str) return null;
   const date = new Date(str);
@@ -85,403 +42,1204 @@ function parseDate(str) {
 }
 
 function safeString(str) {
-  return str && str.toString().trim() !== '' ? str.toString().trim() : null;
+  if (!str) return null;
+  return str.toString().trim() !== '' ? str.toString().trim() : null;
 }
 
-// ==================== TEST ROUTES ====================
+function prepareWorkerParams(worker) {
+  return [
+    safeString(worker.name),
+    safeString(worker.iqamaNumber),
+    safeString(worker.supplier),
+    safeString(worker.position),
+    safeString(worker.phone),
+    parseDate(worker.dateJoined),
+    parseDate(worker.leaveDate),
+    safeString(worker.roomNumber),
+    safeString(worker.MEDICAL) || 'NO'
+  ];
+}
 
-// Simple GET test
-app.get('/api/test', (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'API is working on Vercel!',
-    method: 'GET',
-    timestamp: new Date().toISOString()
-  });
+function prepareStaffParams(staff) {
+  return [
+    safeString(staff.name),
+    safeString(staff.roomNumber),
+    safeString(staff.designation),
+    safeString(staff.phone),
+    safeString(staff.email),
+    safeString(staff.department),
+    parseDate(staff.dateJoined),
+    parseDate(staff.leaveDate)
+  ];
+}
+
+// ============ WORKER ROUTES ============
+
+// --- GET workers for food card assignment ---
+app.get('/workers/for-foodcard-assignment', async (req, res) => {
+  try {
+    const { search } = req.query;
+    
+    let sql = `
+      SELECT 
+        w.id,
+        w.name,
+        w.iqamaNumber as iqama_number,
+        w.supplier,
+        w.position,
+        w.roomNumber,
+        w.MEDICAL
+      FROM workers w
+      WHERE w.leaveDate IS NULL
+        AND w.iqamaNumber IS NOT NULL
+        AND w.iqamaNumber != ''
+        AND NOT EXISTS (
+          SELECT 1 FROM food_cards fc 
+          WHERE fc.iqama_number = w.iqamaNumber
+        )
+    `;
+    
+    const params = [];
+    
+    if (search) {
+      sql += ' AND (w.name LIKE ? OR w.iqamaNumber LIKE ?)';
+      const searchTerm = `%${search}%`;
+      params.push(searchTerm, searchTerm);
+    }
+    
+    sql += ' ORDER BY w.name';
+    
+    const rows = await query(sql, params);
+    
+    res.json({ 
+      success: true,
+      workers: rows,
+      count: rows.length
+    });
+  } catch (err) {
+    console.error("GET /workers/for-foodcard-assignment error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
-// Simple POST test
-app.post('/api/test', (req, res) => {
-  console.log('POST test received:', req.body);
-  res.json({ 
-    success: true, 
-    message: 'POST is working!',
-    received: req.body,
-    method: 'POST'
-  });
-});
-
-// ==================== WORKER ROUTES ====================
-
-// CREATE worker (POST)
-app.post('/api/workers', async (req, res) => {
-  console.log('POST /api/workers - Body:', JSON.stringify(req.body));
+// --- CREATE worker (POST) - FIXED ---
+app.post('/workers', async (req, res) => {
+  console.log('=== POST /workers ===');
+  console.log('Request body:', JSON.stringify(req.body));
   
   try {
-    const { name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber, MEDICAL } = req.body;
+    const workerData = req.body;
     
-    // Validation
-    if (!name) {
+    // Validate required fields
+    if (!workerData.name) {
       return res.status(400).json({ 
-        success: false, 
-        error: 'Worker name is required' 
+        success: false,
+        error: "Worker name is required" 
       });
     }
+    
+    const worker = new Worker(workerData);
     
     const sqlInsert = `
       INSERT INTO workers
         (name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber, MEDICAL)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
-    
-    const params = [
-      safeString(name),
-      safeString(iqamaNumber),
-      safeString(supplier),
-      safeString(position),
-      safeString(phone),
-      parseDate(dateJoined),
-      parseDate(leaveDate),
-      safeString(roomNumber),
-      safeString(MEDICAL) || 'NO'
-    ];
-    
-    await query(sqlInsert, params);
-    
+
+    const result = await query(sqlInsert, prepareWorkerParams(worker));
+    console.log('Insert result:', result);
+
     res.status(201).json({ 
-      success: true, 
-      message: "Worker created successfully",
-      worker: req.body
+      success: true,
+      message: "Worker created successfully", 
+      worker: workerData 
     });
-    
-  } catch (error) {
-    console.error('POST /api/workers error:', error);
+  } catch (err) {
+    console.error("POST /workers error:", err);
     res.status(500).json({ 
-      success: false, 
-      error: error.message 
+      success: false,
+      error: err.message 
     });
   }
 });
 
-// GET all workers (with pagination)
-app.get('/api/workers', async (req, res) => {
-  console.log('GET /api/workers - Query:', req.query);
-  
+// --- GET workers with pagination + search ---
+app.get('/workers', async (req, res) => {
   try {
     let { page, limit, search } = req.query;
-    
+
     page = parseInt(page) || 1;
-    limit = parseInt(limit) || 10;
-    search = search || '';
+    limit = parseInt(limit) || 5;
+    search = (search || "").toString();
     const offset = (page - 1) * limit;
-    
-    // Get total count
+
     const countSql = `
-      SELECT COUNT(*) as total 
-      FROM workers 
-      WHERE name LIKE ? OR iqamaNumber LIKE ?
-    `;
-    const countResult = await query(countSql, [`%${search}%`, `%${search}%`]);
-    const total = countResult[0]?.total || 0;
-    
-    // Get workers
-    const dataSql = `
-      SELECT id, name, iqamaNumber, supplier, position, phone, 
-             dateJoined, leaveDate, roomNumber, MEDICAL
+      SELECT COUNT(*) AS total
       FROM workers
-      WHERE name LIKE ? OR iqamaNumber LIKE ?
+      WHERE name LIKE ?
+    `;
+    const countResult = await query(countSql, [`%${search}%`]);
+    const total = countResult[0]?.total ?? 0;
+
+    const dataSql = `
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber, MEDICAL
+      FROM workers
+      WHERE name LIKE ?
       ORDER BY id
       OFFSET ? ROWS
       FETCH NEXT ? ROWS ONLY
     `;
-    
-    const workers = await query(dataSql, [`%${search}%`, `%${search}%`, offset, limit]);
-    
-    res.json({
-      success: true,
-      workers,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit)
-      }
-    });
-    
-  } catch (error) {
-    console.error('GET /api/workers error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
+    const rows = await query(dataSql, [`%${search}%`, offset, limit]);
 
-// GET active workers
-app.get('/api/workers/active', async (req, res) => {
-  try {
-    const sql = `
-      SELECT id, name, iqamaNumber, supplier, position, phone, 
-             dateJoined, leaveDate, roomNumber, MEDICAL
-      FROM workers
-      WHERE leaveDate IS NULL
-      ORDER BY name
-    `;
-    
-    const workers = await query(sql, []);
-    
-    res.json({
-      success: true,
-      workers,
-      count: workers.length
-    });
-    
-  } catch (error) {
-    console.error('GET /api/workers/active error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
-
-// GET single worker by ID
-app.get('/api/workers/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    const sql = `SELECT * FROM workers WHERE id = ?`;
-    const workers = await query(sql, [id]);
-    
-    if (workers.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Worker not found' 
+    const workers = rows.map(row => {
+      const w = new Worker({
+        name: row.name,
+        iqamaNumber: row.iqamaNumber,
+        supplier: row.supplier,
+        position: row.position,
+        phone: row.phone,
+        dateJoined: row.dateJoined,
+        leaveDate: row.leaveDate,
+        roomNumber: row.roomNumber,
+        MEDICAL: row.MEDICAL
       });
-    }
-    
-    res.json({
-      success: true,
-      worker: workers[0]
+      w.id = row.id;
+      return w;
     });
-    
-  } catch (error) {
-    console.error('GET /api/workers/:id error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+
+    res.json({ workers, total });
+  } catch (err) {
+    console.error("GET /workers error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// UPDATE worker
-app.put('/api/workers/:id', async (req, res) => {
+// --- GET worker by ID ---
+app.get('/workers/:id', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber, MEDICAL } = req.body;
-    
-    const sql = `
-      UPDATE workers 
-      SET name = ?, iqamaNumber = ?, supplier = ?, position = ?, 
-          phone = ?, dateJoined = ?, leaveDate = ?, roomNumber = ?, MEDICAL = ?
+    const id = req.params.id;
+    const sqlSelect = `SELECT * FROM workers WHERE id = ?`;
+    const result = await query(sqlSelect, [id]);
+
+    if (!result || result.length === 0) {
+      return res.status(404).json({ message: "Worker not found" });
+    }
+
+    const row = result[0];
+    const worker = new Worker({
+      name: row.name,
+      iqamaNumber: row.iqamaNumber,
+      supplier: row.supplier,
+      position: row.position,
+      phone: row.phone,
+      dateJoined: row.dateJoined,
+      leaveDate: row.leaveDate,
+      roomNumber: row.roomNumber,
+      MEDICAL: row.MEDICAL
+    });
+    worker.id = row.id;
+
+    res.json({ worker });
+  } catch (err) {
+    console.error("GET /workers/:id error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- UPDATE worker by ID (PUT) - FIXED ---
+app.put('/workers/:id', async (req, res) => {
+  console.log(`=== PUT /workers/${req.params.id} ===`);
+  console.log('Request body:', JSON.stringify(req.body));
+  
+  try {
+    const id = req.params.id;
+    const workerData = req.body;
+
+    const sqlUpdate = `
+      UPDATE workers
+      SET 
+        name = ?, 
+        iqamaNumber = ?, 
+        supplier = ?, 
+        position = ?, 
+        phone = ?, 
+        dateJoined = ?, 
+        leaveDate = ?, 
+        roomNumber = ?,
+        MEDICAL = ?
       WHERE id = ?
     `;
-    
-    const params = [
-      safeString(name),
-      safeString(iqamaNumber),
-      safeString(supplier),
-      safeString(position),
-      safeString(phone),
-      parseDate(dateJoined),
-      parseDate(leaveDate),
-      safeString(roomNumber),
-      safeString(MEDICAL) || 'NO',
-      id
-    ];
-    
-    await query(sql, params);
-    
-    res.json({
+
+    const params = [...prepareWorkerParams(workerData), id];
+    await query(sqlUpdate, params);
+
+    res.json({ 
       success: true,
-      message: 'Worker updated successfully'
+      message: "Worker updated successfully" 
     });
-    
-  } catch (error) {
-    console.error('PUT /api/workers/:id error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+  } catch (err) {
+    console.error("PUT /workers/:id error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// DELETE worker
-app.delete('/api/workers/:id', async (req, res) => {
+// --- DELETE worker by ID - FIXED ---
+app.delete('/workers/:id', async (req, res) => {
+  console.log(`=== DELETE /workers/${req.params.id} ===`);
+  
   try {
-    const { id } = req.params;
-    
-    const sql = `DELETE FROM workers WHERE id = ?`;
-    await query(sql, [id]);
-    
-    res.json({
+    const id = req.params.id;
+    const sqlDelete = `DELETE FROM workers WHERE id = ?`;
+    await query(sqlDelete, [id]);
+
+    res.json({ 
       success: true,
-      message: 'Worker deleted successfully'
+      message: "Worker deleted successfully" 
     });
-    
-  } catch (error) {
-    console.error('DELETE /api/workers/:id error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+  } catch (err) {
+    console.error("DELETE /workers/:id error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Mark worker as left
-app.put('/api/workers/:id/leave', async (req, res) => {
+// --- MARK WORKER AS LEFT ---
+app.put('/workers/:id/leave', async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id;
     const { leaveDate } = req.body;
-    
+
     if (!leaveDate) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Leave date is required' 
-      });
+      return res.status(400).json({ error: "Leave date is required" });
     }
-    
-    const sql = `UPDATE workers SET leaveDate = ? WHERE id = ?`;
-    await query(sql, [parseDate(leaveDate), id]);
-    
-    res.json({
+
+    const sqlUpdate = `
+      UPDATE workers 
+      SET leaveDate = ? 
+      WHERE id = ?
+    `;
+
+    await query(sqlUpdate, [parseDate(leaveDate), id]);
+
+    res.json({ 
       success: true,
-      message: 'Worker marked as left'
+      message: "Worker marked as left successfully",
+      leaveDate: leaveDate
     });
-    
-  } catch (error) {
-    console.error('PUT /api/workers/:id/leave error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+  } catch (err) {
+    console.error("PUT /workers/:id/leave error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Reactivate worker
-app.put('/api/workers/:id/reactivate', async (req, res) => {
+// --- UPDATE WORKER MEDICAL STATUS ---
+app.put('/workers/:id/medical', async (req, res) => {
   try {
-    const { id } = req.params;
-    
-    const sql = `UPDATE workers SET leaveDate = NULL WHERE id = ?`;
-    await query(sql, [id]);
-    
-    res.json({
+    const id = req.params.id;
+    const { MEDICAL } = req.body;
+
+    if (!MEDICAL) {
+      return res.status(400).json({ error: "MEDICAL status is required" });
+    }
+
+    const sqlUpdate = `
+      UPDATE workers 
+      SET MEDICAL = ? 
+      WHERE id = ?
+    `;
+
+    await query(sqlUpdate, [MEDICAL, id]);
+
+    res.json({ 
       success: true,
-      message: 'Worker reactivated'
+      message: "Worker medical status updated successfully",
+      MEDICAL: MEDICAL
     });
-    
-  } catch (error) {
-    console.error('PUT /api/workers/:id/reactivate error:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+  } catch (err) {
+    console.error("PUT /workers/:id/medical error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ==================== DASHBOARD ROUTES ====================
-
-app.get('/api/dashboard', async (req, res) => {
+// --- GET ACTIVE WORKERS ---
+app.get('/workers-active', async (req, res) => {
   try {
-    // Get all active workers
-    const workersSql = `
-      SELECT id, name, iqamaNumber, supplier, position, phone, 
-             dateJoined, roomNumber, MEDICAL
+    const sql = `
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber, MEDICAL
       FROM workers
       WHERE leaveDate IS NULL
       ORDER BY id
     `;
-    const workers = await query(workersSql, []);
-    
-    // Get counts
-    const countsSql = `
+
+    const rows = await query(sql);
+
+    const workers = rows.map(row => {
+      const w = new Worker({
+        name: row.name,
+        iqamaNumber: row.iqamaNumber,
+        supplier: row.supplier,
+        position: row.position,
+        phone: row.phone,
+        dateJoined: row.dateJoined,
+        leaveDate: row.leaveDate,
+        roomNumber: row.roomNumber,
+        MEDICAL: row.MEDICAL
+      });
+      w.id = row.id;
+      return w;
+    });
+
+    res.json({ workers });
+  } catch (err) {
+    console.error("GET /workers-active error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET LEFT WORKERS ---
+app.get('/workers-left', async (req, res) => {
+  try {
+    const sql = `
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber, MEDICAL
+      FROM workers
+      WHERE leaveDate IS NOT NULL
+      ORDER BY leaveDate DESC
+    `;
+
+    const rows = await query(sql);
+
+    const workers = rows.map(row => {
+      const w = new Worker({
+        name: row.name,
+        iqamaNumber: row.iqamaNumber,
+        supplier: row.supplier,
+        position: row.position,
+        phone: row.phone,
+        dateJoined: row.dateJoined,
+        leaveDate: row.leaveDate,
+        roomNumber: row.roomNumber,
+        MEDICAL: row.MEDICAL
+      });
+      w.id = row.id;
+      return w;
+    });
+
+    res.json({ workers });
+  } catch (err) {
+    console.error("GET /workers-left error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- REACTIVATE WORKER ---
+app.put('/workers/:id/reactivate', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const sqlUpdate = `
+      UPDATE workers 
+      SET leaveDate = NULL 
+      WHERE id = ?
+    `;
+
+    await query(sqlUpdate, [id]);
+
+    res.json({ 
+      success: true,
+      message: "Worker reactivated successfully"
+    });
+  } catch (err) {
+    console.error("PUT /workers/:id/reactivate error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET available seats for all rooms ---
+app.get('/rooms/available-seats', async (req, res) => {
+  try {
+    const roomCapacities = {
+      'C-34': 4,
+      'C-35': 4
+    };
+
+    const sql = `
+      SELECT roomNumber, COUNT(*) AS occupied
+      FROM workers
+      WHERE roomNumber IS NOT NULL AND leaveDate IS NULL
+      GROUP BY roomNumber
+    `;
+
+    const result = await query(sql);
+
+    const rooms = result.map(row => {
+      const capacity = roomCapacities[row.roomNumber] || 6;
+      
+      return {
+        roomNumber: row.roomNumber,
+        availableSeats: Math.max(capacity - row.occupied, 0),
+        capacity: capacity,
+        occupiedSeats: row.occupied
+      };
+    });
+
+    res.json({ rooms });
+  } catch (err) {
+    console.error("GET /rooms/available-seats error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET all workers (NO pagination) ---
+app.get('/workers-all', async (req, res) => {
+  try {
+    const sql = `
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber, MEDICAL
+      FROM workers
+      ORDER BY id
+    `;
+
+    const rows = await query(sql);
+
+    const workers = rows.map(row => {
+      const w = new Worker({
+        name: row.name,
+        iqamaNumber: row.iqamaNumber,
+        supplier: row.supplier,
+        position: row.position,
+        phone: row.phone,
+        dateJoined: row.dateJoined,
+        leaveDate: row.leaveDate,
+        roomNumber: row.roomNumber,
+        MEDICAL: row.MEDICAL
+      });
+      w.id = row.id;
+      return w;
+    });
+
+    res.json({ workers });
+  } catch (err) {
+    console.error("GET /workers-all error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET dashboard data ---
+app.get("/dashboard", async (req, res) => {
+  try {
+    const sqlWorkers = `
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber, MEDICAL
+      FROM workers
+      WHERE leaveDate IS NULL
+      ORDER BY id
+    `;
+
+    const rows = await query(sqlWorkers);
+
+    const workers = rows.map(row => {
+      const normalizedPosition = row.position
+        ? row.position.trim().toLowerCase().replace(/\b\w/g, char => char.toUpperCase())
+        : "Unknown";
+
+      return {
+        id: row.id,
+        name: row.name,
+        iqamaNumber: row.iqamaNumber,
+        supplier: row.supplier,
+        position: normalizedPosition,
+        phone: row.phone,
+        dateJoined: row.dateJoined,
+        leaveDate: row.leaveDate,
+        roomNumber: row.roomNumber,
+        MEDICAL: row.MEDICAL
+      };
+    });
+
+    const countSql = `
       SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN leaveDate IS NULL THEN 1 ELSE 0 END) as active,
-        SUM(CASE WHEN leaveDate IS NOT NULL THEN 1 ELSE 0 END) as left_workers
+        COUNT(*) as totalEmployees,
+        COUNT(CASE WHEN leaveDate IS NULL THEN 1 END) as activeEmployees,
+        COUNT(CASE WHEN leaveDate IS NOT NULL THEN 1 END) as leftEmployees
       FROM workers
     `;
-    const counts = await query(countsSql, []);
-    
-    // Get work detail counts
-    const workDetails = {};
+
+    const countResult = await query(countSql);
+    const employeeCounts = countResult[0];
+
+    const countMap = {};
     workers.forEach(w => {
-      const position = w.position || 'Unknown';
-      workDetails[position] = (workDetails[position] || 0) + 1;
+      const key = w.position || "Unknown";
+      countMap[key] = (countMap[key] || 0) + 1;
     });
-    
-    const dashboardCounts = Object.entries(workDetails).map(([workDetail, count]) => ({
-      workDetail,
-      count
+
+    const dashboardCounts = Object.keys(countMap).map(key => ({
+      workDetail: key,
+      count: countMap[key],
     }));
-    
-    res.json({
-      success: true,
-      workers,
+
+    res.json({ 
+      workers, 
       dashboardCounts,
       employeeCounts: {
-        total: counts[0]?.total || 0,
-        active: counts[0]?.active || 0,
-        left: counts[0]?.left_workers || 0
+        total: employeeCounts.totalEmployees,
+        active: employeeCounts.activeEmployees,
+        left: employeeCounts.leftEmployees
       }
     });
+  } catch (err) {
+    console.error("GET /dashboard error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET dashboard stats ---
+app.get("/dashboard/stats", async (req, res) => {
+  try {
+    const statsSql = `
+      SELECT 
+        COUNT(*) as totalWorkers,
+        COUNT(CASE WHEN leaveDate IS NULL THEN 1 END) as activeWorkers,
+        COUNT(CASE WHEN leaveDate IS NOT NULL THEN 1 END) as leftWorkers,
+        COUNT(DISTINCT roomNumber) as occupiedRooms,
+        COUNT(DISTINCT supplier) as totalSuppliers
+      FROM workers
+    `;
+
+    const result = await query(statsSql);
+    const stats = result[0];
+
+    res.json({ stats });
+  } catch (err) {
+    console.error("GET /dashboard/stats error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET duplicate workers ---
+app.get("/workers-duplicates", async (req, res) => {
+  try {
+    const sql = `
+      SELECT t.*, d.total AS duplicate_count
+      FROM workers t
+      JOIN (
+        SELECT iqamaNumber, COUNT(*) AS total
+        FROM workers
+        WHERE iqamaNumber IS NOT NULL AND iqamaNumber != ''
+        GROUP BY iqamaNumber
+        HAVING COUNT(*) > 1
+      ) d ON t.iqamaNumber = d.iqamaNumber
+      ORDER BY t.iqamaNumber
+    `;
+
+    const rows = await query(sql);
+    res.json({ duplicates: rows });
+  } catch (err) {
+    console.error("GET /workers-duplicates error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============ STAFF ROUTES ============
+
+// --- CREATE staff ---
+app.post('/staff', async (req, res) => {
+  try {
+    const staff = new Staff(req.body);
+    console.log('Creating staff:', staff);
+
+    const sqlInsert = `
+      INSERT INTO staff
+        (name, roomNumber, designation, phone, email, department, dateJoined, leaveDate)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    await query(sqlInsert, prepareStaffParams(staff));
+
+    res.status(201).json({ 
+      success: true,
+      message: "Staff created successfully", 
+      staff 
+    });
+  } catch (err) {
+    console.error("POST /staff error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET all staff with pagination ---
+app.get('/staff', async (req, res) => {
+  try {
+    let { page, limit, search } = req.query;
+
+    page = parseInt(page) || 1;
+    limit = parseInt(limit) || 10;
+    search = (search || "").toString();
+    const offset = (page - 1) * limit;
+
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM staff
+      WHERE name LIKE ? OR designation LIKE ? OR roomNumber LIKE ?
+    `;
+    const countResult = await query(countSql, [`%${search}%`, `%${search}%`, `%${search}%`]);
+    const total = countResult[0]?.total ?? 0;
+
+    const dataSql = `
+      SELECT id, name, roomNumber, designation, phone, email, department, dateJoined, leaveDate
+      FROM staff
+      WHERE name LIKE ? OR designation LIKE ? OR roomNumber LIKE ?
+      ORDER BY name
+      OFFSET ? ROWS
+      FETCH NEXT ? ROWS ONLY
+    `;
+    const rows = await query(dataSql, [`%${search}%`, `%${search}%`, `%${search}%`, offset, limit]);
+
+    const staff = rows.map(row => {
+      const s = new Staff({
+        name: row.name,
+        roomNumber: row.roomNumber,
+        designation: row.designation,
+        phone: row.phone,
+        email: row.email,
+        department: row.department,
+        dateJoined: row.dateJoined,
+        leaveDate: row.leaveDate
+      });
+      s.id = row.id;
+      return s;
+    });
+
+    res.json({ staff, total });
+  } catch (err) {
+    console.error("GET /staff error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET staff by ID ---
+app.get('/staff/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const sqlSelect = `SELECT * FROM staff WHERE id = ?`;
+    const result = await query(sqlSelect, [id]);
+
+    if (!result || result.length === 0) {
+      return res.status(404).json({ message: "Staff not found" });
+    }
+
+    const row = result[0];
+    const staff = new Staff({
+      name: row.name,
+      roomNumber: row.roomNumber,
+      designation: row.designation,
+      phone: row.phone,
+      email: row.email,
+      department: row.department,
+      dateJoined: row.dateJoined,
+      leaveDate: row.leaveDate
+    });
+    staff.id = row.id;
+
+    res.json({ staff });
+  } catch (err) {
+    console.error("GET /staff/:id error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- UPDATE staff by ID ---
+app.put('/staff/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const sqlUpdate = `
+      UPDATE staff
+      SET 
+        name = ?, 
+        roomNumber = ?, 
+        designation = ?, 
+        phone = ?, 
+        email = ?, 
+        department = ?, 
+        dateJoined = ?, 
+        leaveDate = ?
+      WHERE id = ?
+    `;
+
+    const params = [
+      req.body.name,
+      req.body.roomNumber,
+      req.body.designation,
+      req.body.phone,
+      req.body.email,
+      req.body.department,
+      parseDate(req.body.dateJoined),
+      parseDate(req.body.leaveDate),
+      id
+    ];
+
+    await query(sqlUpdate, params);
+
+    res.json({ 
+      success: true,
+      message: "Staff updated successfully" 
+    });
+  } catch (err) {
+    console.error("PUT /staff/:id error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- DELETE staff by ID ---
+app.delete('/staff/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const sqlDelete = `DELETE FROM staff WHERE id = ?`;
+    await query(sqlDelete, [id]);
+
+    res.json({ 
+      success: true,
+      message: "Staff deleted successfully" 
+    });
+  } catch (err) {
+    console.error("DELETE /staff/:id error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- GET all staff (NO pagination) ---
+app.get('/staff-all', async (req, res) => {
+  try {
+    const sql = `
+      SELECT id, name, roomNumber, designation, phone, email, department, dateJoined, leaveDate
+      FROM staff
+      ORDER BY name
+    `;
+
+    const rows = await query(sql);
+
+    const staff = rows.map(row => {
+      const s = new Staff({
+        name: row.name,
+        roomNumber: row.roomNumber,
+        designation: row.designation,
+        phone: row.phone,
+        email: row.email,
+        department: row.department,
+        dateJoined: row.dateJoined,
+        leaveDate: row.leaveDate
+      });
+      s.id = row.id;
+      return s;
+    });
+
+    res.json({ staff });
+  } catch (err) {
+    console.error("GET /staff-all error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- MARK STAFF AS LEFT ---
+app.put('/staff/:id/leave', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { leaveDate } = req.body;
+
+    if (!leaveDate) {
+      return res.status(400).json({ error: "Leave date is required" });
+    }
+
+    const sqlUpdate = `
+      UPDATE staff 
+      SET leaveDate = ? 
+      WHERE id = ?
+    `;
+
+    await query(sqlUpdate, [parseDate(leaveDate), id]);
+
+    res.json({ 
+      success: true,
+      message: "Staff marked as left successfully",
+      leaveDate: leaveDate
+    });
+  } catch (err) {
+    console.error("PUT /staff/:id/leave error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- REACTIVATE STAFF ---
+app.put('/staff/:id/reactivate', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const sqlUpdate = `
+      UPDATE staff 
+      SET leaveDate = NULL 
+      WHERE id = ?
+    `;
+
+    await query(sqlUpdate, [id]);
+
+    res.json({ 
+      success: true,
+      message: "Staff reactivated successfully"
+    });
+  } catch (err) {
+    console.error("PUT /staff/:id/reactivate error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============ FOOD CARDS ROUTES ============
+
+// --- GET workers with food cards ---
+app.get('/workers/with-foodcards', async (req, res) => {
+  try {
+    const { search, has_card } = req.query;
     
-  } catch (error) {
-    console.error('GET /api/dashboard error:', error);
+    let sql = `
+      SELECT 
+        w.id,
+        w.name,
+        w.iqamaNumber as iqama_number,
+        w.supplier,
+        w.position,
+        w.roomNumber,
+        fc.card_number,
+        fc.status as card_status
+      FROM workers w
+      LEFT JOIN food_cards fc ON w.iqamaNumber = fc.iqama_number
+      WHERE w.leaveDate IS NULL
+        AND w.iqamaNumber IS NOT NULL
+    `;
+    
+    const params = [];
+    
+    if (has_card === 'yes') {
+      sql += ' AND fc.card_number IS NOT NULL';
+    } else if (has_card === 'no') {
+      sql += ' AND fc.card_number IS NULL';
+    }
+    
+    if (search) {
+      sql += ' AND (w.name LIKE ? OR w.iqamaNumber LIKE ?)';
+      const searchTerm = `%${search}%`;
+      params.push(searchTerm, searchTerm);
+    }
+    
+    sql += ' ORDER BY w.name';
+    
+    const rows = await query(sql, params);
+    
+    res.json({ 
+      success: true,
+      workers: rows,
+      count: rows.length
+    });
+  } catch (err) {
+    console.error("GET /workers/with-foodcards error:", err);
     res.status(500).json({ 
-      success: false, 
-      error: error.message 
+      success: false,
+      error: err.message 
     });
   }
 });
 
-// ==================== ROOT ROUTE ====================
-app.get('/api', (req, res) => {
-  res.json({
-    name: 'Worker Management API',
-    version: '1.0.0',
-    status: 'running',
-    endpoints: [
-      'GET  /api/test',
-      'POST /api/test',
-      'GET  /api/workers',
-      'POST /api/workers',
-      'GET  /api/workers/:id',
-      'PUT  /api/workers/:id',
-      'DELETE /api/workers/:id',
-      'GET  /api/workers/active',
-      'GET  /api/dashboard'
-    ]
-  });
+// --- ASSIGN food card to worker ---
+app.put('/food-cards/:card_number/assign', async (req, res) => {
+  try {
+    const { card_number } = req.params;
+    const { iqama_number } = req.body;
+    
+    if (!iqama_number) {
+      return res.status(400).json({ 
+        success: false,
+        error: "IQAMA number is required" 
+      });
+    }
+    
+    const cardCheck = await query(
+      'SELECT id, iqama_number FROM food_cards WHERE card_number = ?',
+      [card_number]
+    );
+    
+    if (cardCheck.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: `Food card ${card_number} not found` 
+      });
+    }
+    
+    if (cardCheck[0].iqama_number) {
+      return res.status(400).json({ 
+        success: false,
+        error: `Card ${card_number} already assigned` 
+      });
+    }
+    
+    const workerCheck = await query(
+      'SELECT id, name FROM workers WHERE iqamaNumber = ? AND leaveDate IS NULL',
+      [iqama_number]
+    );
+    
+    if (workerCheck.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: `Worker not found or inactive` 
+      });
+    }
+    
+    const worker = workerCheck[0];
+    
+    const workerCardCheck = await query(
+      'SELECT card_number FROM food_cards WHERE iqama_number = ?',
+      [iqama_number]
+    );
+    
+    if (workerCardCheck.length > 0) {
+      return res.status(400).json({ 
+        success: false,
+        error: `Worker already has card ${workerCardCheck[0].card_number}` 
+      });
+    }
+    
+    await query(
+      `UPDATE food_cards 
+       SET iqama_number = ?, worker_id = ?, status = 'ACTIVE', updated_at = GETDATE()
+       WHERE card_number = ?`,
+      [iqama_number, worker.id, card_number]
+    );
+    
+    res.json({
+      success: true,
+      message: `Card ${card_number} assigned successfully`,
+      data: {
+        card_number,
+        iqama_number,
+        worker_name: worker.name
+      }
+    });
+  } catch (err) {
+    console.error("PUT /food-cards/:card_number/assign error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    success: false, 
-    error: `Route ${req.originalUrl} not found` 
-  });
+// --- UNASSIGN food card ---
+app.put('/food-cards/:card_number/unassign', async (req, res) => {
+  try {
+    const { card_number } = req.params;
+    
+    const cardCheck = await query(
+      'SELECT iqama_number FROM food_cards WHERE card_number = ?',
+      [card_number]
+    );
+    
+    if (cardCheck.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: `Card not found` 
+      });
+    }
+    
+    if (!cardCheck[0].iqama_number) {
+      return res.status(400).json({ 
+        success: false,
+        error: `Card is not assigned` 
+      });
+    }
+    
+    await query(
+      `UPDATE food_cards 
+       SET iqama_number = NULL, worker_id = NULL, status = 'INACTIVE', updated_at = GETDATE()
+       WHERE card_number = ?`,
+      [card_number]
+    );
+    
+    res.json({
+      success: true,
+      message: `Card ${card_number} unassigned successfully`
+    });
+  } catch (err) {
+    console.error("PUT /food-cards/:card_number/unassign error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
-// Error handler
-app.use((err, req, res, next) => {
-  console.error('Global error:', err);
-  res.status(500).json({ 
-    success: false, 
-    error: err.message || 'Internal server error' 
-  });
+// --- GET assigned cards ---
+app.get('/food-cards/assigned', async (req, res) => {
+  try {
+    const { search, page = 1, limit = 20 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    
+    let whereClause = 'fc.iqama_number IS NOT NULL';
+    const params = [];
+    
+    if (search) {
+      whereClause += ' AND (fc.card_number LIKE ? OR fc.iqama_number LIKE ? OR w.name LIKE ?)';
+      const searchTerm = `%${search}%`;
+      params.push(searchTerm, searchTerm, searchTerm);
+    }
+    
+    const countSql = `
+      SELECT COUNT(*) as total
+      FROM food_cards fc
+      LEFT JOIN workers w ON fc.iqama_number = w.iqamaNumber
+      WHERE ${whereClause}
+    `;
+    
+    const countResult = await query(countSql, params);
+    const total = countResult[0]?.total || 0;
+    
+    const dataSql = `
+      SELECT 
+        fc.id,
+        fc.card_number,
+        fc.iqama_number,
+        fc.status,
+        fc.issue_date,
+        w.id as worker_id,
+        w.name,
+        w.supplier,
+        w.position,
+        w.roomNumber
+      FROM food_cards fc
+      LEFT JOIN workers w ON fc.iqama_number = w.iqamaNumber
+      WHERE ${whereClause}
+      ORDER BY fc.card_number
+      OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+    `;
+    
+    const dataParams = [...params, offset, parseInt(limit)];
+    const results = await query(dataSql, dataParams);
+    
+    res.json({ 
+      success: true,
+      cards: results,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (err) {
+    console.error("GET /food-cards/assigned error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
 });
 
-// Export for Vercel
+// --- GET available cards ---
+app.get('/food-cards/available', async (req, res) => {
+  try {
+    const { search, page = 1, limit = 50 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    
+    let whereClause = 'iqama_number IS NULL';
+    const params = [];
+    
+    if (search) {
+      whereClause += ' AND card_number LIKE ?';
+      params.push(`%${search}%`);
+    }
+    
+    const countSql = `
+      SELECT COUNT(*) as total
+      FROM food_cards
+      WHERE ${whereClause}
+    `;
+    
+    const countResult = await query(countSql, params);
+    const total = countResult[0]?.total || 0;
+    
+    const dataSql = `
+      SELECT 
+        id,
+        card_number,
+        status,
+        issue_date
+      FROM food_cards
+      WHERE ${whereClause}
+      ORDER BY card_number
+      OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+    `;
+    
+    const dataParams = [...params, offset, parseInt(limit)];
+    const results = await query(dataSql, dataParams);
+    
+    res.json({ 
+      success: true,
+      cards: results,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (err) {
+    console.error("GET /food-cards/available error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
+});
+
+// --- GET card summary ---
+app.get('/food-cards/summary', async (req, res) => {
+  try {
+    const sql = `
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN iqama_number IS NOT NULL THEN 1 ELSE 0 END) as assigned,
+        SUM(CASE WHEN iqama_number IS NULL THEN 1 ELSE 0 END) as available,
+        MIN(card_number) as first_card,
+        MAX(card_number) as last_card
+      FROM food_cards
+    `;
+    
+    const result = await query(sql);
+    const summary = result[0];
+    
+    const assignedPercentage = summary.total > 0 
+      ? ((summary.assigned / summary.total) * 100).toFixed(2)
+      : "0";
+    
+    res.json({ 
+      success: true,
+      summary: {
+        ...summary,
+        assigned_percentage: assignedPercentage,
+        available_percentage: (100 - parseFloat(assignedPercentage)).toFixed(2)
+      }
+    });
+  } catch (err) {
+    console.error("GET /food-cards/summary error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
+});
+
+// ============ START SERVER ============
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
+
 module.exports = app;
