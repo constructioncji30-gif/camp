@@ -45,7 +45,8 @@ app.get('/workers/for-foodcard-assignment', async (req, res) => {
         w.iqamaNumber as iqama_number,
         w.supplier,
         w.position,
-        w.roomNumber
+        w.roomNumber,
+        w.MEDICAL
       FROM workers w
       WHERE w.leaveDate IS NULL
         AND w.iqamaNumber IS NOT NULL
@@ -137,7 +138,8 @@ app.get('/workers', async (req, res) => {
         phone: row.phone,
         dateJoined: row.dateJoined,
         leaveDate: row.leaveDate,
-        roomNumber: row.roomNumber
+        roomNumber: row.roomNumber,
+        MEDICAL:row.MEDICAL,
       });
       w.id = row.id;
       return w;
@@ -171,7 +173,8 @@ app.get('/workers/:id', async (req, res) => {
       phone: row.phone,
       dateJoined: row.dateJoined,
       leaveDate: row.leaveDate,
-      roomNumber: row.roomNumber
+      roomNumber: row.roomNumber,
+      MEDICAL:row.MEDICAL
     });
     worker.id = row.id;
 
@@ -197,7 +200,8 @@ app.put('/workers/:id', async (req, res) => {
         phone = ?, 
         dateJoined = ?, 
         leaveDate = ?, 
-        roomNumber = ?
+        roomNumber = ?,
+        row.MEDICAL=?,
       WHERE id = ?
     `;
 
@@ -253,11 +257,39 @@ app.put('/workers/:id/leave', async (req, res) => {
   }
 });
 
+app.put('/workers/:id/MEDICAL', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { MEDICAL } = req.body;
+
+    // Validate leave date
+    if (!MEDICAL) {
+      return res.status(400).json({ error: "Leave date is required" });
+    }
+
+    const sqlUpdate = `
+      UPDATE workers 
+      SET MEDICAL = ? 
+      WHERE id = ?
+    `;
+
+    await query(sqlUpdate, [MEDICAL, id]);
+
+    res.json({ 
+      message: "Worker marked as MEDICAL successfully",
+      MEDICAL: MEDICAL
+    });
+  } catch (err) {
+    console.error("PUT /workers/:id/MEDICAL error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- GET ACTIVE WORKERS (leaveDate IS NULL) ---
 app.get('/workers-active', async (req, res) => {
   try {
     const sql = `
-      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber,MEDICAL
       FROM workers
       WHERE leaveDate IS NULL
       ORDER BY id
@@ -274,7 +306,8 @@ app.get('/workers-active', async (req, res) => {
         phone: row.phone,
         dateJoined: row.dateJoined,
         leaveDate: row.leaveDate,
-        roomNumber: row.roomNumber
+        roomNumber: row.roomNumber,
+        MEDICAL:row.MEDICAL
       });
       w.id = row.id;
       return w;
@@ -291,7 +324,7 @@ app.get('/workers-active', async (req, res) => {
 app.get('/workers-left', async (req, res) => {
   try {
     const sql = `
-      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber,MEDICAL
       FROM workers
       WHERE leaveDate IS NOT NULL
       ORDER BY leaveDate DESC
@@ -308,7 +341,8 @@ app.get('/workers-left', async (req, res) => {
         phone: row.phone,
         dateJoined: row.dateJoined,
         leaveDate: row.leaveDate,
-        roomNumber: row.roomNumber
+        roomNumber: row.roomNumber,
+        MEDICAL:row.MEDICAL
       });
       w.id = row.id;
       return w;
@@ -386,7 +420,7 @@ app.get('/rooms/available-seats', async (req, res) => {
 app.get('/workers-all', async (req, res) => {
   try {
     const sql = `
-      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber,MEDICAL
       FROM workers
       ORDER BY id
     `;
@@ -403,7 +437,8 @@ app.get('/workers-all', async (req, res) => {
         phone: row.phone,
         dateJoined: row.dateJoined,
         leaveDate: row.leaveDate,
-        roomNumber: row.roomNumber
+        roomNumber: row.roomNumber,
+        MEDICAL:row.MEDICAL
       });
       w.id = row.id;
       return w;
@@ -421,7 +456,7 @@ app.get('/workers-all', async (req, res) => {
 app.get("/dashboard", async (req, res) => {
   try {
     const sqlWorkers = `
-      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber
+      SELECT id, name, iqamaNumber, supplier, position, phone, dateJoined, leaveDate, roomNumber,MEDICAL
       FROM workers
       WHERE leaveDate IS NULL  -- Only active workers
       ORDER BY id
@@ -443,7 +478,8 @@ app.get("/dashboard", async (req, res) => {
         phone: row.phone,
         dateJoined: row.dateJoined,
         leaveDate: row.leaveDate,
-        roomNumber: row.roomNumber
+        roomNumber: row.roomNumber,
+        MEDICAL:row.MEDICAL
       };
     });
 

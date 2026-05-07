@@ -9,6 +9,7 @@ class Worker {
     this.dateJoined = body.dateJoined || null;
     this.leaveDate = body.leaveDate || null;
        this.roomNumber = body.roomNumber;
+       this.MEDICAL=body.MEDICAL
   }
 }
 
